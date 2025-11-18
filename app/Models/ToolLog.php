@@ -10,6 +10,13 @@ class ToolLog extends Model
     use HasFactory;
 
     /**
+     * The table associated with the model.
+     *
+     * @var string
+     */
+    protected $table = 'tool_logs';
+
+    /**
      * The attributes that are mass assignable.
      *
      * @var array<int, string>
@@ -26,6 +33,7 @@ class ToolLog extends Model
      * @var array<string, string>
      */
     protected $casts = [
+        'details' => 'array',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

@@ -20,24 +20,29 @@ class ImageGenController extends Controller
     public function generate(Request $request)
     {
         // Increase script execution time for heavy image generation tasks
-        ini_set('max_execution_time', 300);
-        ini_set('max_input_time', 300);
+        ini_set('max_execution_time', 600);
+        ini_set('max_input_time', 600);
         ini_set('memory_limit', '1024M');
-        set_time_limit(300);
+        set_time_limit(600);
         
         $request->validate([
-            'prompts' => 'required|string',
+            'prompts' => 'required|array|min:1|max:10',
+            'prompts.*' => 'required|string|max:200',
         ]);
 
         try {
             // Parse prompts (support both comma-separated and CSV)
             $prompts = [];
-            if (strpos($request->prompts, ',') !== false) {
+            
+            // Ensure we're working with a string
+            $promptsInput = is_array($request->prompts) ? implode(', ', $request->prompts) : $request->prompts;
+            
+            if (strpos($promptsInput, ',') !== false) {
                 // Comma-separated
-                $prompts = array_map('trim', explode(',', $request->prompts));
+                $prompts = array_map('trim', explode(',', $promptsInput));
             } else {
                 // Single prompt or CSV content
-                $prompts = FileService::parseCsvPrompts($request->prompts);
+                $prompts = FileService::parseCsvPrompts($promptsInput);
             }
 
             // Remove empty prompts
@@ -61,7 +66,7 @@ class ImageGenController extends Controller
                     $result = ApiService::huggingFaceRequest(
                         'stabilityai/stable-diffusion-xl-base-1.0',
                         ['inputs' => $prompt],
-                        ['timeout' => 300, 'connect_timeout' => 60] // Increased timeout for XL model
+                        ['timeout' => 600, 'connect_timeout' => 60] // Increased timeout for XL model
                     );
 
                     if ($result['success']) {
@@ -72,7 +77,28 @@ class ImageGenController extends Controller
                             $failedPrompts[] = $prompt;
                         }
                     } else {
-                        $failedPrompts[] = $prompt . ' (' . $result['error'] . ')';
+                        // Check if this is a retryable error
+                        if (isset($result['retryable']) && $result['retryable']) {
+                            // Try one more time with a different model
+                            $result = ApiService::huggingFaceRequest(
+                                'black-forest-labs/FLUX.1-dev', // Alternative FREE model
+                                ['inputs' => $prompt],
+                                ['timeout' => 600, 'connect_timeout' => 60]
+                            );
+                            
+                            if ($result['success']) {
+                                $imageUrl = FileService::saveFile($result['data'], 'ai_images', 'png');
+                                if ($imageUrl) {
+                                    $images[] = $imageUrl;
+                                } else {
+                                    $failedPrompts[] = $prompt . ' (Failed to save image)';
+                                }
+                            } else {
+                                $failedPrompts[] = $prompt . ' (' . $result['error'] . ')';
+                            }
+                        } else {
+                            $failedPrompts[] = $prompt . ' (' . $result['error'] . ')';
+                        }
                     }
                 }
             }
@@ -112,11 +138,12 @@ class ImageGenController extends Controller
     public function downloadAll(Request $request)
     {
         // Increase script execution time for ZIP creation
-        ini_set('max_execution_time', 300);
-        set_time_limit(300);
+        ini_set('max_execution_time', 600);
+        set_time_limit(600);
         
         $request->validate([
             'images' => 'required|array',
+            'images.*' => 'required|string',
         ]);
 
         try {

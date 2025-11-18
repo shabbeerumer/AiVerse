@@ -18,10 +18,10 @@ class AudioController extends Controller
     public function downloadAudio(Request $request)
     {
         // Increase script execution time
-        ini_set('max_execution_time', 300);
-        ini_set('max_input_time', 300);
+        ini_set('max_execution_time', 900);
+        ini_set('max_input_time', 900);
         ini_set('memory_limit', '1024M');
-        set_time_limit(300);
+        set_time_limit(900);
         
         $request->validate([
             'url' => 'required|url',
@@ -38,36 +38,60 @@ class AudioController extends Controller
                 ], 400);
             }
 
-            // Download audio using yt-dlp
-            $result = ApiService::executeYtdlp($request->url);
+            // Progressive timeout approach - try with increasing timeouts
+            $timeouts = [300, 600, 900]; // 5, 10, and 15 minutes
+            $lastError = null;
             
-            if ($result['success']) {
-                $audioUrl = FileService::saveFile($result['data'], 'audio', 'mp3');
+            foreach ($timeouts as $timeout) {
+                // Download audio using yt-dlp with current timeout
+                $result = ApiService::executeYtdlp($request->url, ['timeout' => $timeout]);
                 
-                if ($audioUrl) {
-                    // Log the tool usage
-                    ToolLog::create([
-                        'tool_name' => 'audio_downloader',
-                        'user_ip' => $request->ip(),
-                        'details' => json_encode(['video_id' => $videoId])
-                    ]);
+                if ($result['success']) {
+                    $audioUrl = FileService::saveFile($result['data'], 'audio', 'mp3');
+                    
+                    if ($audioUrl) {
+                        // Log the tool usage
+                        ToolLog::create([
+                            'tool_name' => 'audio_downloader',
+                            'user_ip' => $request->ip(),
+                            'details' => json_encode(['video_id' => $videoId])
+                        ]);
 
-                    return response()->json([
-                        'success' => true,
-                        'audio_url' => $audioUrl
-                    ]);
+                        return response()->json([
+                            'success' => true,
+                            'audio_url' => $audioUrl
+                        ]);
+                    } else {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Failed to save audio file'
+                        ], 500);
+                    }
                 } else {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Failed to save audio file'
-                    ], 500);
+                    // Store the error for potential reporting
+                    $lastError = $result;
+                    
+                    // If this is the last attempt, return the error
+                    if ($timeout == end($timeouts)) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Audio download failed after all timeout attempts: ' . $result['error'],
+                            'retryable' => $result['retryable'] ?? false
+                        ], 500);
+                    }
+                    
+                    // If the error is not retryable, don't continue with more attempts
+                    if (isset($result['retryable']) && !$result['retryable']) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Audio download failed: ' . $result['error'],
+                            'retryable' => false
+                        ], 500);
+                    }
+                    
+                    // Log the attempt for debugging
+                    \Log::info("YouTube audio download attempt with {$timeout} seconds timeout failed: " . $result['error']);
                 }
-            } else {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Audio download failed: ' . $result['error'],
-                    'retryable' => $result['retryable'] ?? false
-                ], 500);
             }
         } catch (\Exception $e) {
             return response()->json([

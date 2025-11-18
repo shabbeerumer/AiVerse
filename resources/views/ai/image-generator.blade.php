@@ -135,6 +135,16 @@
                 return;
             }
             
+            // Convert prompts string to array
+            let promptsArray;
+            if (prompts.includes(',')) {
+                // Split by comma for multiple prompts
+                promptsArray = prompts.split(',').map(prompt => prompt.trim()).filter(prompt => prompt.length > 0);
+            } else {
+                // Single prompt
+                promptsArray = [prompts];
+            }
+            
             // Show loading spinner and progress bar
             $('#loadingSpinner').show();
             $('#progressBar').show();
@@ -148,7 +158,7 @@
                 method: 'POST',
                 data: {
                     _token: $('meta[name="csrf-token"]').attr('content'),
-                    prompts: prompts
+                    prompts: promptsArray
                 },
                 success: function(response) {
                     hideLoading();

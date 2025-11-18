@@ -17,48 +17,36 @@ class BgRemoveController extends Controller
 
     public function removeBackground(Request $request)
     {
-        // Increase script execution time
-        ini_set('max_execution_time', 300);
-        ini_set('max_input_time', 300);
-        ini_set('memory_limit', '1024M');
-        set_time_limit(300);
-
-        $request->validate([
-            'image' => 'required|file',
-        ]);
-
         try {
-            // Validate file
-            $file = $request->file('image');
-            $validation = FileService::validateFile($file, ['image/jpeg', 'image/png', 'image/webp'], 5120);
+            $request->validate([
+                'image' => 'required|image|mimes:jpeg,png,jpg,gif|max:10240',
+            ]);
 
-            if (!$validation['valid']) {
+            $file = $request->file('image');
+            
+            // Validate file size (10MB max)
+            if ($file->getSize() > 10 * 1024 * 1024) {
                 return response()->json([
                     'success' => false,
-                    'message' => $validation['error']
+                    'message' => 'File size exceeds 10MB limit'
                 ], 400);
             }
 
-            // Read image
-            $imageData = base64_encode(file_get_contents($file->getPathname()));
-
-            // === FREE MODEL REQUEST ===
-            $payload = [
-                "inputs" => $imageData
-            ];
-
+            // Read the image file
+            $imageData = file_get_contents($file->getPathname());
+            
+            // Process the image with the free model only
             $result = ApiService::huggingFaceRequest(
-                'zhaozijie3132/BiRefNet',
-                $payload,
-                ['timeout' => 300, 'connect_timeout' => 60]
+                'Xenova/rmbg-1.4', // FREE model
+                ['inputs' => ['image' => base64_encode($imageData)]], // Correct HF format
+                ['timeout' => 600, 'connect_timeout' => 60]
             );
-
-            // SUCCESS
+            
             if ($result['success']) {
-
                 $resultUrl = FileService::saveFile($result['data'], 'bg_removed', 'png');
-
+                
                 if ($resultUrl) {
+                    // Log the tool usage
                     ToolLog::create([
                         'tool_name' => 'background_remover',
                         'user_ip' => $request->ip(),
@@ -68,53 +56,62 @@ class BgRemoveController extends Controller
                         'success' => true,
                         'result_url' => $resultUrl
                     ]);
+                } else {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Failed to save processed image'
+                    ], 500);
                 }
+            } else {
+                // Check if this is a retryable error
+                if (isset($result['retryable']) && $result['retryable']) {
+                    // Try one more time with a different model
+                    $result = ApiService::huggingFaceRequest(
+                        'briaai/RMBG-1.4', // Alternative model
+                        ['inputs' => ['image' => base64_encode($imageData)]],
+                        ['timeout' => 600, 'connect_timeout' => 60]
+                    );
+                    
+                    if ($result['success']) {
+                        $resultUrl = FileService::saveFile($result['data'], 'bg_removed', 'png');
+                        
+                        if ($resultUrl) {
+                            // Log the tool usage
+                            ToolLog::create([
+                                'tool_name' => 'background_remover',
+                                'user_ip' => $request->ip(),
+                            ]);
 
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Failed to save processed image'
-                ], 500);
-            }
-
-            // === FALLBACK TO PAID MODEL (IF FREE MODEL FAILS) ===
-            if (strpos($result['error'], 'Payment Required') !== false) {
-
-                $result = ApiService::huggingFaceRequest(
-                    'briaai/RMBG-1.4',
-                    ["inputs" => $imageData],
-                    ['timeout' => 300, 'connect_timeout' => 60]
-                );
-
-                if ($result['success']) {
-                    $resultUrl = FileService::saveFile($result['data'], 'bg_removed', 'png');
-
-                    if ($resultUrl) {
-                        ToolLog::create([
-                            'tool_name' => 'background_remover',
-                            'user_ip' => $request->ip(),
-                        ]);
-
+                            return response()->json([
+                                'success' => true,
+                                'result_url' => $resultUrl
+                            ]);
+                        } else {
+                            return response()->json([
+                                'success' => false,
+                                'message' => 'Failed to save processed image'
+                            ], 500);
+                        }
+                    } else {
                         return response()->json([
-                            'success' => true,
-                            'result_url' => $resultUrl
-                        ]);
+                            'success' => false,
+                            'message' => 'Background removal failed: ' . $result['error'],
+                            'retryable' => $result['retryable'] ?? false
+                        ], 500);
                     }
+                } else {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Background removal failed: ' . $result['error'],
+                        'retryable' => $result['retryable'] ?? false
+                    ], 500);
                 }
             }
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Background removal failed: ' . $result['error'],
-                'retryable' => $result['retryable'] ?? false
-            ], 500);
-
         } catch (\Exception $e) {
-
             return response()->json([
                 'success' => false,
                 'message' => 'Error processing image: ' . $e->getMessage()
             ], 500);
-
         }
     }
 
@@ -133,20 +130,18 @@ class BgRemoveController extends Controller
                 return response()->json(['success' => false, 'message' => 'File not found'], 404);
             }
 
+            // Log the tool usage
             ToolLog::create([
                 'tool_name' => 'background_remover_download',
                 'user_ip' => $request->ip(),
             ]);
 
             return response()->download($filePath, $filename)->deleteFileAfterSend(false);
-
         } catch (\Exception $e) {
-
             return response()->json([
                 'success' => false,
                 'message' => 'Error downloading image: ' . $e->getMessage()
             ], 500);
-
         }
     }
 }

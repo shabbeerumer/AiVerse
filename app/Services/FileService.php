@@ -19,6 +19,14 @@ class FileService
     public static function saveFile($data, $directory, $extension = 'png')
     {
         try {
+            // Validate directory
+            if (!is_dir(storage_path('app/public/' . $directory))) {
+                if (!mkdir(storage_path('app/public/' . $directory), 0755, true)) {
+                    \Log::error('Failed to create directory: ' . $directory);
+                    return null;
+                }
+            }
+            
             $filename = $directory . '/' . Str::random(40) . '.' . $extension;
             Storage::disk('public')->put($filename, $data);
             return Storage::url($filename);
@@ -48,7 +56,10 @@ class FileService
             // Ensure directory exists
             $zipDir = dirname($zipFullPath);
             if (!file_exists($zipDir)) {
-                mkdir($zipDir, 0755, true);
+                if (!mkdir($zipDir, 0755, true)) {
+                    \Log::error('Failed to create directory: ' . $zipDir);
+                    return null;
+                }
             }
             
             $zip = new ZipArchive();

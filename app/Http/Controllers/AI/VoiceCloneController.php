@@ -15,29 +15,15 @@ class VoiceCloneController extends Controller
         return view('ai.voice-clone');
     }
 
-    public function clone(Request $request)
+    public function generateVoice(Request $request)
     {
-        // Increase script execution time
-        ini_set('max_execution_time', 300);
-        ini_set('max_input_time', 300);
-        ini_set('memory_limit', '1024M');
-        set_time_limit(300);
-        
-        $request->validate([
-            'voice_sample' => 'required|file',
-            'text' => 'required|string|max:1000',
-        ]);
-
         try {
-            // Validate text
-            $text = trim($request->text);
-            if (empty($text)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Text cannot be empty'
-                ], 400);
-            }
+            $request->validate([
+                'text' => 'required|string|max:1000',
+            ]);
 
+            $text = $request->input('text');
+            
             // Check for special characters that might cause issues
             if (preg_match('/[<>{}[\]\\\\\/]/', $text)) {
                 return response()->json([
@@ -46,25 +32,11 @@ class VoiceCloneController extends Controller
                 ], 400);
             }
 
-            // Validate file
-            $file = $request->file('voice_sample');
-            $validation = FileService::validateFile($file, ['audio/wav', 'audio/mp3'], 10240);
-            
-            if (!$validation['valid']) {
-                return response()->json([
-                    'success' => false,
-                    'message' => $validation['error']
-                ], 400);
-            }
-
-            // Read the voice sample file
-            $voiceData = file_get_contents($file->getPathname());
-            
-            // Generate voice with a free alternative model
+            // Generate voice with the free model only
             $result = ApiService::huggingFaceRequest(
-                'facebook/fastspeech2-en-ljspeech', // Free alternative to coqui/XTTS-v2
-                ['inputs' => $text],
-                ['timeout' => 300, 'connect_timeout' => 60]
+                'suno/bark', // FREE model
+                ['inputs' => $text], // Correct HF format
+                ['timeout' => 600, 'connect_timeout' => 60]
             );
             
             if ($result['success']) {
@@ -89,18 +61,47 @@ class VoiceCloneController extends Controller
                     ], 500);
                 }
             } else {
-                // Fallback to another free model if the first one fails
-                if (strpos($result['error'], 'Payment Required') !== false) {
+                // Try the other free model as fallback
+                $result = ApiService::huggingFaceRequest(
+                    'espnet/kan-bayashi-ljspeech-vits', // Alternative FREE model
+                    ['inputs' => $text], // Correct HF format
+                    ['timeout' => 600, 'connect_timeout' => 60]
+                );
+                
+                if ($result['success']) {
+                    $audioUrl = FileService::saveFile($result['data'], 'voices', 'wav');
+                    
+                    if ($audioUrl) {
+                        // Log the tool usage
+                        ToolLog::create([
+                            'tool_name' => 'voice_clone',
+                            'user_ip' => $request->ip(),
+                            'details' => json_encode(['text_length' => strlen($text)])
+                        ]);
+
+                        return response()->json([
+                            'success' => true,
+                            'audio_url' => $audioUrl
+                        ]);
+                    } else {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Failed to save generated audio'
+                        ], 500);
+                    }
+                } else {
+                    // Try a third model as fallback
                     $result = ApiService::huggingFaceRequest(
-                        'coqui/XTTS-v2',
+                        'facebook/fastspeech2-en-ljspeech', // Third FREE model
                         ['inputs' => $text],
-                        ['timeout' => 300, 'connect_timeout' => 60]
+                        ['timeout' => 600, 'connect_timeout' => 60]
                     );
                     
                     if ($result['success']) {
                         $audioUrl = FileService::saveFile($result['data'], 'voices', 'wav');
                         
                         if ($audioUrl) {
+                            // Log the tool usage
                             ToolLog::create([
                                 'tool_name' => 'voice_clone',
                                 'user_ip' => $request->ip(),
@@ -111,15 +112,20 @@ class VoiceCloneController extends Controller
                                 'success' => true,
                                 'audio_url' => $audioUrl
                             ]);
+                        } else {
+                            return response()->json([
+                                'success' => false,
+                                'message' => 'Failed to save generated audio'
+                            ], 500);
                         }
+                    } else {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Voice cloning failed: ' . $result['error'],
+                            'retryable' => $result['retryable'] ?? false
+                        ], 500);
                     }
                 }
-                
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Voice cloning failed: ' . $result['error'],
-                    'retryable' => $result['retryable'] ?? false
-                ], 500);
             }
         } catch (\Exception $e) {
             return response()->json([

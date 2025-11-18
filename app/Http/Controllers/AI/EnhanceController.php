@@ -15,38 +15,31 @@ class EnhanceController extends Controller
         return view('ai.enhancer');
     }
 
-    public function enhance(Request $request)
+    public function enhanceImage(Request $request)
     {
-        // Increase script execution time
-        ini_set('max_execution_time', 300);
-        ini_set('max_input_time', 300);
-        ini_set('memory_limit', '1024M');
-        set_time_limit(300);
-        
-        $request->validate([
-            'image' => 'required|file',
-        ]);
-
         try {
-            // Validate file
+            $request->validate([
+                'image' => 'required|image|mimes:jpeg,png,jpg,gif|max:10240',
+            ]);
+
             $file = $request->file('image');
-            $validation = FileService::validateFile($file, ['image/jpeg', 'image/png', 'image/webp'], 5120);
             
-            if (!$validation['valid']) {
+            // Validate file size (10MB max)
+            if ($file->getSize() > 10 * 1024 * 1024) {
                 return response()->json([
                     'success' => false,
-                    'message' => $validation['error']
+                    'message' => 'File size exceeds 10MB limit'
                 ], 400);
             }
 
             // Read the image file
             $imageData = file_get_contents($file->getPathname());
             
-            // Enhance the image with a free alternative model
+            // Enhance the image with the free model only
             $result = ApiService::huggingFaceRequest(
-                'nightmareai/real-esrgan', // Free alternative to swin2SR
-                ['inputs' => base64_encode($imageData)],
-                ['timeout' => 300, 'connect_timeout' => 60]
+                'Xenova/real-esrgan', // FREE model
+                ['inputs' => ['image' => base64_encode($imageData)]], // Correct HF format
+                ['timeout' => 600, 'connect_timeout' => 60]
             );
             
             if ($result['success']) {
@@ -70,18 +63,20 @@ class EnhanceController extends Controller
                     ], 500);
                 }
             } else {
-                // Fallback to another free model if the first one fails
-                if (strpos($result['error'], 'Payment Required') !== false) {
+                // Check if this is a retryable error
+                if (isset($result['retryable']) && $result['retryable']) {
+                    // Try one more time with a different model
                     $result = ApiService::huggingFaceRequest(
-                        'caidas/swin2SR-classical-sr-x2-64',
-                        ['inputs' => base64_encode($imageData)],
-                        ['timeout' => 300, 'connect_timeout' => 60]
+                        'nightmareai/real-esrgan', // Alternative model
+                        ['inputs' => ['image' => base64_encode($imageData)]],
+                        ['timeout' => 600, 'connect_timeout' => 60]
                     );
                     
                     if ($result['success']) {
                         $resultUrl = FileService::saveFile($result['data'], 'enhanced', 'png');
                         
                         if ($resultUrl) {
+                            // Log the tool usage
                             ToolLog::create([
                                 'tool_name' => 'image_enhancer',
                                 'user_ip' => $request->ip(),
@@ -91,15 +86,26 @@ class EnhanceController extends Controller
                                 'success' => true,
                                 'result_url' => $resultUrl
                             ]);
+                        } else {
+                            return response()->json([
+                                'success' => false,
+                                'message' => 'Failed to save enhanced image'
+                            ], 500);
                         }
+                    } else {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Image enhancement failed: ' . $result['error'],
+                            'retryable' => $result['retryable'] ?? false
+                        ], 500);
                     }
+                } else {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Image enhancement failed: ' . $result['error'],
+                        'retryable' => $result['retryable'] ?? false
+                    ], 500);
                 }
-                
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Image enhancement failed: ' . $result['error'],
-                    'retryable' => $result['retryable'] ?? false
-                ], 500);
             }
         } catch (\Exception $e) {
             return response()->json([

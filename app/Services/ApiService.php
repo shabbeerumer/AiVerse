@@ -227,8 +227,8 @@ class ApiService
     public static function executeYtdlp($url, $options = [])
     {
         // Increase script execution time
-        ini_set('max_execution_time', 300);
-        set_time_limit(300);
+        ini_set('max_execution_time', 900);
+        set_time_limit(900);
         
         try {
             // Sanitize URL
@@ -243,14 +243,16 @@ class ApiService
             }
 
             // Get yt-dlp path with fallbacks
-            $ytDlpPath = env('YT_DLP_PATH', self::getDefaultYtdlpPath());
+            $ytDlpPath = env('YT_DLP_PATH');
             
-            // Fallback to direct .env parsing if not found
-            if (!$ytDlpPath || $ytDlpPath === self::getDefaultYtdlpPath()) {
-                $envPath = self::getEnvValue('YT_DLP_PATH');
-                if ($envPath) {
-                    $ytDlpPath = $envPath;
-                }
+            // If not found in env(), try direct .env parsing
+            if (!$ytDlpPath) {
+                $ytDlpPath = self::getEnvValue('YT_DLP_PATH');
+            }
+            
+            // If still not found, use default
+            if (!$ytDlpPath) {
+                $ytDlpPath = self::getDefaultYtdlpPath();
             }
             
             // Additional check for Windows paths with quotes
@@ -260,9 +262,10 @@ class ApiService
             
             // Validate that yt-dlp exists
             if (!self::isCommandAvailable($ytDlpPath)) {
-                // Try alternative paths
+                // Try alternative paths including system PATH
                 $alternativePaths = [
                     'yt-dlp.exe',
+                    'yt-dlp',
                     'C:/Users/usama/AppData/Roaming/Python/Python310/Scripts/yt-dlp.exe',
                     'C:\\Users\\usama\\AppData\\Roaming\\Python\\Python310\\Scripts\\yt-dlp.exe',
                     '/usr/bin/yt-dlp',
@@ -275,6 +278,15 @@ class ApiService
                         $ytDlpPath = $path;
                         $found = true;
                         break;
+                    }
+                }
+                
+                // If still not found, try to find it in the system PATH
+                if (!$found) {
+                    $systemPath = self::findCommandInPath('yt-dlp.exe');
+                    if ($systemPath && self::isCommandAvailable($systemPath)) {
+                        $ytDlpPath = $systemPath;
+                        $found = true;
                     }
                 }
                 
@@ -292,14 +304,17 @@ class ApiService
                 'extract_audio' => true,
                 'audio_format' => 'mp3',
                 'audio_quality' => 0,
-                'timeout' => 300 // Increased from 300 to 300 seconds (5 minutes)
+                'timeout' => 900 // Increased from 300 to 900 seconds (15 minutes)
             ];
             
             $options = array_merge($defaultOptions, $options);
             
-            // Create a temporary file for the audio
+            // Create a temporary file base name for the audio (don't create the file yet)
             $tempDir = sys_get_temp_dir();
-            $tempFile = tempnam($tempDir, 'yt_audio_');
+            $tempBaseName = $tempDir . DIRECTORY_SEPARATOR . 'yt_audio_' . uniqid();
+            
+            // Debug: Log the temp base name
+            Log::info('yt-dlp temp base name: ' . $tempBaseName);
             
             // Build command
             $command = "\"" . str_replace('"', '', $ytDlpPath) . "\"";
@@ -320,9 +335,13 @@ class ApiService
                 $command .= " -f " . escapeshellarg($options['format']);
             }
             
-            $command .= " -o " . escapeshellarg($tempFile . '.%(ext)s');
+            // Use the base name for the output pattern
+            $command .= " -o " . escapeshellarg($tempBaseName . '.%(ext)s');
             $command .= " " . escapeshellarg($url);
             $command .= " 2>&1";
+            
+            // Debug: Log the command
+            Log::info('yt-dlp command: ' . $command);
             
             // Execute command with timeout
             $descriptorspec = [
@@ -357,7 +376,7 @@ class ApiService
                     proc_terminate($process);
                     return [
                         'success' => false,
-                        'error' => 'yt-dlp process timed out',
+                        'error' => 'yt-dlp process timed out after ' . $timeout . ' seconds',
                         'retryable' => true
                     ];
                 }
@@ -373,6 +392,11 @@ class ApiService
             
             $exitCode = proc_close($process);
             
+            // Debug: Log the output and errors
+            Log::info('yt-dlp output: ' . $output);
+            Log::info('yt-dlp errors: ' . $errors);
+            Log::info('yt-dlp exit code: ' . $exitCode);
+            
             if ($exitCode !== 0) {
                 Log::error('yt-dlp command failed: ' . $errors . ' Command: ' . $command);
                 
@@ -385,34 +409,63 @@ class ApiService
             
             // Find the actual output file (yt-dlp adds extension)
             $outputFile = null;
-            $extensions = ['mp3', 'wav', 'm4a', 'flac', 'opus'];
+            $extensions = ['mp3', 'wav', 'm4a', 'flac', 'opus', 'aac', 'ogg'];
             
-            foreach ($extensions as $ext) {
-                $potentialFile = $tempFile . '.' . $ext;
-                if (file_exists($potentialFile)) {
-                    $outputFile = $potentialFile;
-                    break;
+            // Debug: Check what files were created
+            Log::info('Looking for output files with base name: ' . $tempBaseName);
+            
+            // First, check if the exact temp file exists (no extension added)
+            if (file_exists($tempBaseName)) {
+                Log::info('Found temp file without extension: ' . $tempBaseName);
+                $outputFile = $tempBaseName;
+            }
+            
+            // If not found, check with extensions
+            if (!$outputFile) {
+                foreach ($extensions as $ext) {
+                    $potentialFile = $tempBaseName . '.' . $ext;
+                    if (file_exists($potentialFile)) {
+                        Log::info('Found output file with extension ' . $ext . ': ' . $potentialFile);
+                        $outputFile = $potentialFile;
+                        break;
+                    }
+                }
+            }
+            
+            // If still not found, do a more comprehensive search
+            if (!$outputFile) {
+                Log::info('Doing comprehensive search for files matching pattern: ' . $tempBaseName . '.*');
+                $files = glob($tempBaseName . '.*');
+                if (!empty($files)) {
+                    $outputFile = $files[0];
+                    Log::info('Found output file through glob: ' . $outputFile);
                 }
             }
             
             if (!$outputFile || !file_exists($outputFile)) {
-                // Clean up temp file if exists
-                if (file_exists($tempFile)) {
-                    unlink($tempFile);
-                }
+                // Debug: List all files in temp directory that might be related
+                Log::info('Audio file not found. Checking temp directory contents:');
+                $allFiles = scandir($tempDir);
+                $ytFiles = array_filter($allFiles, function($file) use ($tempBaseName) {
+                    return strpos($file, basename($tempBaseName)) !== false;
+                });
+                Log::info('Files matching temp base name in temp directory: ' . implode(', ', $ytFiles));
                 
                 return [
                     'success' => false,
-                    'error' => 'Audio file not found after download',
+                    'error' => 'Audio file not found after download. Exit code: ' . $exitCode . '. Output: ' . trim($output) . '. Errors: ' . trim($errors),
                     'retryable' => true
                 ];
             }
             
             $audioData = file_get_contents($outputFile);
             
+            // Debug: Log file size
+            Log::info('Audio file size: ' . strlen($audioData) . ' bytes');
+            
             // Clean up temporary files
-            if (file_exists($tempFile)) {
-                unlink($tempFile);
+            if (file_exists($tempBaseName)) {
+                unlink($tempBaseName);
             }
             
             if (file_exists($outputFile)) {
@@ -486,41 +539,98 @@ class ApiService
             // Clean the command path
             $command = trim($command, '"\'');
             
-            // Check if file exists
-            if (!file_exists($command)) {
-                // If it's just a command name (no path), check if it's in PATH
-                if (strpos($command, '/') === false && strpos($command, '\\') === false) {
-                    // On Windows, check with .exe extension
-                    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-                        $command .= '.exe';
-                    }
+            // Check if file exists as a full path
+            if (file_exists($command)) {
+                // If it's a full path, just test if it's executable
+                $descriptorspec = [
+                    0 => ["pipe", "r"],
+                    1 => ["pipe", "w"],
+                    2 => ["pipe", "w"]
+                ];
+                
+                // For Windows, we need to handle the command properly
+                if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                    // On Windows, we need to use cmd to execute the command
+                    $testCommand = 'cmd /c "' . $command . '" --version';
                 } else {
-                    return false;
+                    $testCommand = $command . ' --version';
                 }
+                
+                $process = @proc_open($testCommand, $descriptorspec, $pipes);
+                
+                if (is_resource($process)) {
+                    fclose($pipes[0]);
+                    $output = stream_get_contents($pipes[1]);
+                    $errors = stream_get_contents($pipes[2]);
+                    fclose($pipes[1]);
+                    fclose($pipes[2]);
+                    $exitCode = proc_close($process);
+                    return $exitCode === 0;
+                }
+                
+                return false;
             }
             
-            $descriptorspec = [
-                0 => ["pipe", "r"],
-                1 => ["pipe", "w"],
-                2 => ["pipe", "w"]
-            ];
-            
-            $process = @proc_open($command . ' --version', $descriptorspec, $pipes);
-            
-            if (is_resource($process)) {
-                fclose($pipes[0]);
-                fclose($pipes[1]);
-                fclose($pipes[2]);
-                $exitCode = proc_close($process);
-                return $exitCode === 0;
+            // If it's just a command name (no path separators), check if it's in PATH
+            if (strpos($command, '/') === false && strpos($command, '\\') === false) {
+                // On Windows, check with .exe extension
+                if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                    $command .= '.exe';
+                }
+                
+                $descriptorspec = [
+                    0 => ["pipe", "r"],
+                    1 => ["pipe", "w"],
+                    2 => ["pipe", "w"]
+                ];
+                
+                // For Windows, we need to handle the command properly
+                if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                    $testCommand = 'cmd /c ' . $command . ' --version';
+                } else {
+                    $testCommand = $command . ' --version';
+                }
+                
+                $process = @proc_open($testCommand, $descriptorspec, $pipes);
+                
+                if (is_resource($process)) {
+                    fclose($pipes[0]);
+                    $output = stream_get_contents($pipes[1]);
+                    $errors = stream_get_contents($pipes[2]);
+                    fclose($pipes[1]);
+                    fclose($pipes[2]);
+                    $exitCode = proc_close($process);
+                    return $exitCode === 0;
+                }
+                
+                return false;
             }
             
+            // If it contains path separators but file doesn't exist
             return false;
         } catch (\Exception $e) {
             return false;
         }
     }
-
+    
+    /**
+     * Find a command in the system PATH
+     *
+     * @param string $command
+     * @return string|null
+     */
+    public static function findCommandInPath($command)
+    {
+        $paths = explode(PATH_SEPARATOR, getenv('PATH'));
+        foreach ($paths as $path) {
+            $fullPath = rtrim($path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $command;
+            if (file_exists($fullPath) && is_executable($fullPath)) {
+                return $fullPath;
+            }
+        }
+        return null;
+    }
+    
     /**
      * Get default yt-dlp path based on OS
      *

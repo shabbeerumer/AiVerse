@@ -28,12 +28,12 @@ Route::prefix('ai')->group(function () {
 
     // Image Enhancer
     Route::get('/enhancer', [EnhanceController::class, 'index'])->name('ai.enhancer');
-    Route::post('/enhancer/process', [EnhanceController::class, 'enhance'])->name('ai.enhancer.process');
+    Route::post('/enhancer/process', [EnhanceController::class, 'enhanceImage'])->name('ai.enhancer.process');
     Route::post('/enhancer/download', [EnhanceController::class, 'download'])->name('ai.enhancer.download');
 
     // Voice Clone
     Route::get('/voice-clone', [VoiceCloneController::class, 'index'])->name('ai.voice-clone');
-    Route::post('/voice-clone/generate', [VoiceCloneController::class, 'clone'])->name('ai.voice-clone.generate');
+    Route::post('/voice-clone/generate', [VoiceCloneController::class, 'generateVoice'])->name('ai.voice-clone.generate');
     Route::post('/voice-clone/download', [VoiceCloneController::class, 'download'])->name('ai.voice-clone.download');
 
     // Thumbnail Downloader
