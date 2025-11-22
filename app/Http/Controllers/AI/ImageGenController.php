@@ -8,6 +8,7 @@ use App\Services\ApiService;
 use App\Services\FileService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use ZipArchive;
 
 class ImageGenController extends Controller
@@ -60,45 +61,113 @@ class ImageGenController extends Controller
             $images = [];
             $failedPrompts = [];
 
+            // List of confirmed FREE models that generate REAL images
+            $models = [
+                'black-forest-labs/FLUX.1-schnell',
+                'stabilityai/sd-turbo',
+                'playgroundai/playground-v2.5'
+            ];
+
             foreach ($prompts as $prompt) {
                 if (!empty($prompt)) {
-                    // Use the new Stable Diffusion XL model
-                    $result = ApiService::huggingFaceRequest(
-                        'stabilityai/stable-diffusion-xl-base-1.0',
-                        ['inputs' => $prompt],
-                        ['timeout' => 600, 'connect_timeout' => 60] // Increased timeout for XL model
-                    );
+                    $promptFailed = false;
+                    $lastError = '';
+                    $modelUsed = '';
+                    $skipReason = '';
+                    
+                    // Try each model in sequence until one works
+                    foreach ($models as $model) {
+                        // Use the correct format for image generation models
+                        $parameters = [
+                            'inputs' => $prompt,
+                            'parameters' => [
+                                'guidance_scale' => 3,
+                                'num_inference_steps' => 4
+                            ]
+                        ];
+                        
+                        $result = ApiService::huggingFaceRequest(
+                            $model,
+                            $parameters,
+                            ['timeout' => 600, 'connect_timeout' => 60]
+                        );
 
-                    if ($result['success']) {
-                        $imageUrl = FileService::saveFile($result['data'], 'ai_images', 'png');
-                        if ($imageUrl) {
-                            $images[] = $imageUrl;
-                        } else {
-                            $failedPrompts[] = $prompt;
-                        }
-                    } else {
-                        // Check if this is a retryable error
-                        if (isset($result['retryable']) && $result['retryable']) {
-                            // Try one more time with a different model
-                            $result = ApiService::huggingFaceRequest(
-                                'black-forest-labs/FLUX.1-dev', // Alternative FREE model
-                                ['inputs' => $prompt],
-                                ['timeout' => 600, 'connect_timeout' => 60]
-                            );
-                            
-                            if ($result['success']) {
+                        if ($result['success']) {
+                            // Check if the result is a valid image (not SVG, shapes, etc.)
+                            if ($this->isValidImage($result['data'], $result['content_type'])) {
                                 $imageUrl = FileService::saveFile($result['data'], 'ai_images', 'png');
                                 if ($imageUrl) {
                                     $images[] = $imageUrl;
+                                    $promptFailed = false;
+                                    $modelUsed = $model;
+                                    $skipReason = "Success";
+                                    break; // Success, move to next prompt
                                 } else {
-                                    $failedPrompts[] = $prompt . ' (Failed to save image)';
+                                    $lastError = 'Failed to save image';
+                                    $promptFailed = true;
                                 }
                             } else {
-                                $failedPrompts[] = $prompt . ' (' . $result['error'] . ')';
+                                // Invalid image format (SVG, shapes, etc.)
+                                $lastError = 'Model returned invalid image format (abstract shapes/SVG)';
+                                $skipReason = "Invalid image format";
+                                // Try next model
+                                continue;
                             }
                         } else {
-                            $failedPrompts[] = $prompt . ' (' . $result['error'] . ')';
+                            $lastError = $result['error'] ?? 'Unknown error';
+                            $promptFailed = true;
+                            
+                            // Handle payment required errors (skip instantly)
+                            if (isset($result['retryable']) && !$result['retryable'] && 
+                                (strpos(strtolower($lastError), 'payment') !== false || 
+                                 strpos(strtolower($lastError), '402') !== false)) {
+                                $skipReason = "Payment required";
+                                continue; // Skip to next model instantly
+                            }
+                            
+                            // For other errors, check if it's retryable
+                            if (isset($result['retryable']) && $result['retryable']) {
+                                // Try one more time with the same model
+                                $retryResult = ApiService::huggingFaceRequest(
+                                    $model,
+                                    $parameters,
+                                    ['timeout' => 600, 'connect_timeout' => 60]
+                                );
+                                
+                                if ($retryResult['success']) {
+                                    // Check if the retry result is a valid image
+                                    if ($this->isValidImage($retryResult['data'], $retryResult['content_type'])) {
+                                        $imageUrl = FileService::saveFile($retryResult['data'], 'ai_images', 'png');
+                                        if ($imageUrl) {
+                                            $images[] = $imageUrl;
+                                            $promptFailed = false;
+                                            $modelUsed = $model;
+                                            $skipReason = "Success on retry";
+                                            break; // Success, move to next prompt
+                                        } else {
+                                            $lastError = 'Failed to save image';
+                                            $promptFailed = true;
+                                        }
+                                    } else {
+                                        $lastError = 'Model returned invalid image format (abstract shapes/SVG) on retry';
+                                        // Try next model
+                                        continue;
+                                    }
+                                }
+                            }
                         }
+                    }
+                    
+                    // Log model usage and skip reason
+                    \Log::info("Image generation attempt for prompt: '{$prompt}'", [
+                        'model_used' => $modelUsed,
+                        'skip_reason' => $skipReason,
+                        'last_error' => $lastError
+                    ]);
+                    
+                    // If all models failed for this prompt
+                    if ($promptFailed) {
+                        $failedPrompts[] = $prompt . ' (' . $lastError . ')';
                     }
                 }
             }
@@ -133,6 +202,62 @@ class ImageGenController extends Controller
                 'message' => 'Failed to generate images: ' . $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Check if the returned data is a valid image (not SVG, shapes, patterns, masks, or color blobs)
+     */
+    private function isValidImage($data, $contentType)
+    {
+        // Check if data is empty
+        if (empty($data)) {
+            return false;
+        }
+        
+        // Check content type for valid image types
+        if ($contentType && (strpos($contentType, 'image/png') !== false || 
+                            strpos($contentType, 'image/jpeg') !== false)) {
+            // Check if it's very small (likely not a real image)
+            if (strlen($data) < 100) {
+                return false;
+            }
+            
+            // Check the first few bytes to determine file type
+            $header = substr($data, 0, 10);
+            
+            // PNG signature
+            if (substr($header, 0, 8) === "\x89PNG\x0D\x0A\x1A\x0A") {
+                return true;
+            }
+            
+            // JPEG signature
+            if (substr($header, 0, 2) === "\xFF\xD8") {
+                return true;
+            }
+        }
+        
+        // Check if it's SVG or contains SVG-like content (abstract shapes)
+        if (stripos($data, '<svg') !== false || stripos($data, '<path') !== false || 
+            stripos($data, '<rect') !== false || stripos($data, '<circle') !== false) {
+            return false;
+        }
+        
+        // Check if it's XML (likely SVG)
+        if (stripos($data, '<?xml') !== false) {
+            return false;
+        }
+        
+        // Check if it contains common abstract pattern indicators
+        if (preg_match('/<pattern|<mask|<linearGradient|<radialGradient/i', $data)) {
+            return false;
+        }
+        
+        // If it has a valid image content type and reasonable size, accept it
+        if ($contentType && (strpos($contentType, 'image/') !== false) && strlen($data) > 1000) {
+            return true;
+        }
+        
+        return false;
     }
 
     public function downloadAll(Request $request)

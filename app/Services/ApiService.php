@@ -47,19 +47,30 @@ class ApiService
             
             $options = array_merge($defaultOptions, $options);
             
-            // Updated to use the new router endpoint
+            // Use the NEW router endpoint
             $url = "https://router.huggingface.co/hf-inference/models/{$model}";
             
             // Special handling for models that require specific data format
+            // Only process base64 encoding for non-image generation models
             if ($model === 'briaai/RMBG-1.4' || $model === 'caidas/swin2SR-classical-sr-x2-64' || 
                 $model === 'zhaozijie3132/BiRefNet' || $model === 'nightmareai/real-esrgan' ||
-                $model === 'facebook/fastspeech2-en-ljspeech') {
+                $model === 'facebook/fastspeech2-en-ljspeech' || $model === 'ZhengPeng7/BiRefNet' ||
+                $model === 'skytnt/anime-seg') {
                 // These models expect base64 encoded inputs for image models
-                if ((strpos($model, 'RMBG') !== false || strpos($model, 'esrgan') !== false || strpos($model, 'BiRefNet') !== false) && 
+                if ((strpos($model, 'RMBG') !== false || strpos($model, 'esrgan') !== false || 
+                     strpos($model, 'BiRefNet') !== false || strpos($model, 'anime-seg') !== false) && 
                     isset($data['inputs']) && !is_string($data['inputs'])) {
                     $data['inputs'] = base64_encode($data['inputs']);
                 }
             }
+            // For image generation models, we don't modify the data - send as is
+            
+            // Log the request for debugging
+            Log::info("Hugging Face API Request to: {$url}", [
+                'model' => $model,
+                'data_keys' => array_keys($data),
+                'data_sample' => array_slice($data, 0, 2) // First 2 elements only
+            ]);
             
             $response = Http::withHeaders([
                 'Authorization' => 'Bearer ' . $token,
@@ -68,6 +79,14 @@ class ApiService
                 ->timeout($options['timeout'])
                 ->connectTimeout($options['connect_timeout']) // Added connect timeout
                 ->post($url, $data);
+            
+            // Log response info
+            Log::info("Hugging Face API Response", [
+                'model' => $model,
+                'status' => $response->status(),
+                'content_type' => $response->header('Content-Type'),
+                'content_length' => strlen($response->body())
+            ]);
             
             // Handle rate limiting
             if ($response->status() == 429) {
@@ -116,15 +135,43 @@ class ApiService
             if ($response->status() == 402) {
                 return [
                     'success' => false,
-                    'error' => 'Payment required for this model. Please check your Hugging Face subscription or try a free alternative.',
+                    'error' => 'Payment required for this model. We are trying alternative free models.',
                     'retryable' => false
                 ];
             }
             
             if ($response->successful()) {
+                // Check content type to determine if it's an image
+                $contentType = $response->header('Content-Type', '');
+                $isImage = strpos($contentType, 'image/') !== false;
+                
+                // Get response body
+                $body = $response->body();
+                
+                Log::info("Response analysis", [
+                    'is_image' => $isImage,
+                    'content_type' => $contentType,
+                    'content_length' => strlen($body),
+                    'first_100_bytes' => substr($body, 0, 100)
+                ]);
+                
+                // Additional check for SVG or abstract content
+                if ($isImage || strpos($contentType, 'application/octet-stream') !== false) {
+                    // Check if it's actually SVG or abstract content
+                    if (self::isAbstractContent($body)) {
+                        return [
+                            'success' => false,
+                            'error' => 'Model returned abstract content (SVG/shapes) instead of real image',
+                            'retryable' => false
+                        ];
+                    }
+                }
+                
                 return [
                     'success' => true,
-                    'data' => $response->body()
+                    'data' => $body,
+                    'content_type' => $contentType,
+                    'is_image' => $isImage
                 ];
             }
             
@@ -132,7 +179,8 @@ class ApiService
                 'success' => false,
                 'error' => 'API request failed: ' . $response->reason(),
                 'status' => $response->status(),
-                'retryable' => $response->status() >= 500
+                'retryable' => $response->status() >= 500,
+                'response_body' => $response->body()
             ];
         } catch (\Exception $e) {
             Log::error('Hugging Face API request failed: ' . $e->getMessage());
@@ -143,6 +191,51 @@ class ApiService
                 'retryable' => true
             ];
         }
+    }
+    
+    /**
+     * Check if the response contains abstract content like SVG or geometric shapes
+     */
+    private static function isAbstractContent($data)
+    {
+        // Check if data is empty
+        if (empty($data)) {
+            return true;
+        }
+        
+        // Check if it's very small (likely not a real image)
+        if (strlen($data) < 100) {
+            return true;
+        }
+        
+        // Check the first few bytes to determine file type
+        $header = substr($data, 0, 10);
+        
+        // If it starts with PNG or JPEG signature, it's likely a real image
+        if (substr($header, 0, 8) === "\x89PNG\x0D\x0A\x1A\x0A" || 
+            substr($header, 0, 2) === "\xFF\xD8") {
+            return false;
+        }
+        
+        // Check if it's SVG or contains SVG-like content (abstract shapes)
+        if (stripos($data, '<svg') !== false || stripos($data, '<path') !== false || 
+            stripos($data, '<rect') !== false || stripos($data, '<circle') !== false) {
+            return true;
+        }
+        
+        // Check if it's XML (likely SVG)
+        if (stripos($data, '<?xml') !== false) {
+            return true;
+        }
+        
+        // Check if it contains common abstract pattern indicators
+        if (preg_match('/<pattern|<mask|<linearGradient|<radialGradient/i', $data)) {
+            return true;
+        }
+        
+        // If we can't determine it's a real image, assume it might be abstract
+        // Real images are typically much larger than abstract shapes
+        return strlen($data) < 1000;
     }
 
     /**

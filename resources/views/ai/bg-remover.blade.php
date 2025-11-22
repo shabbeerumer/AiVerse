@@ -22,7 +22,7 @@
                 <div class="mb-3">
                     <label for="image" class="form-label">Upload Image:</label>
                     <input class="form-control" type="file" id="image" name="image" accept="image/*" required>
-                    <div class="form-text">Supported formats: JPG, PNG, WEBP (Max 5MB)</div>
+                    <div class="form-text">Supported formats: JPG, PNG, WEBP (Max 10MB)</div>
                 </div>
                 
                 <div class="d-grid">
@@ -46,7 +46,7 @@
                     <img id="resultImage" src="" class="img-fluid rounded image-preview" alt="Result Image" loading="lazy">
                     
                     <div class="d-grid mt-3">
-                        <a href="#" id="downloadBtn" class="btn btn-success">
+                        <a href="#" id="downloadBtn" class="btn btn-success" download>
                             <i class="bi bi-download"></i> Download Result
                         </a>
                     </div>
@@ -79,6 +79,13 @@
             $('#loadingSpinner').show();
             $('#processBtn').prop('disabled', true);
             
+            // Display original image preview
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                $('#originalImage').attr('src', e.target.result);
+            }
+            reader.readAsDataURL(imageFile);
+            
             const formData = new FormData();
             formData.append('_token', $('meta[name="csrf-token"]').attr('content'));
             formData.append('image', imageFile);
@@ -101,8 +108,12 @@
                     } else {
                         showAlert(response.message, 'danger');
                         
+                        // Provide specific guidance for payment-related errors
+                        if (response.message && response.message.toLowerCase().includes('payment')) {
+                            showAlert('We are trying multiple free models. If this continues to fail, you may need to add your own Hugging Face API token to the .env file or try again later when free quota is available. As an alternative, consider installing the free "rembg" Python package locally.', 'info');
+                        }
                         // If error is retryable, show retry option
-                        if (response.retryable) {
+                        else if (response.retryable) {
                             showAlert('You can try again in a few moments.', 'info');
                         }
                     }
@@ -116,6 +127,11 @@
                         message = xhr.responseJSON.message;
                     }
                     showAlert(message, 'danger');
+                    
+                    // Provide specific guidance for payment-related errors
+                    if (message && message.toLowerCase().includes('payment')) {
+                        showAlert('We are trying multiple free models. If this continues to fail, you may need to add your own Hugging Face API token to the .env file or try again later when free quota is available. As an alternative, consider installing the free "rembg" Python package locally.', 'info');
+                    }
                 }
             });
         }
