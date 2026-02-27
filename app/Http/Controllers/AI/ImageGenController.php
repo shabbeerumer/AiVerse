@@ -63,10 +63,11 @@ class ImageGenController extends Controller
 
             // List of confirmed FREE models that generate REAL images
             $models = [
-                'black-forest-labs/FLUX.1-schnell',
-                'stabilityai/sd-turbo',
-                'playgroundai/playground-v2.5'
-            ];
+    'black-forest-labs/FLUX.1-dev',
+    'stabilityai/sd-turbo',
+    'lykon/dreamshaper-8'
+];
+    
 
             foreach ($prompts as $prompt) {
                 if (!empty($prompt)) {
